@@ -1,3 +1,5 @@
 # shrimpsbot
-
+npm install
 Start the bot with the command "node index.js"
+
+To by-pass youtube's limitation, this bot downloads songs before playing it. All downloaded songs gets deleted at the end.
