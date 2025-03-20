@@ -1,174 +1,298 @@
 const { Client, GuildMember, Intents, GatewayIntentBits } = require("discord.js");
 const { Player, QueryType } = require("discord-player");
-
-const client = new Client({
+const Discord = require("discord.js");
+const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, StreamType, entersState, VoiceConnectionStatus, joinVoiceChannel } = require('@discordjs/voice');
+const client = new Discord.Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates]
 });
-
 require('dotenv').config();
 
-const player = new Player(client);
+const ytdl = require("@distube/ytdl-core");
+const playdl = require('play-dl');
+
+const prefix = "!"
+const Bottleneck = require('bottleneck');
+var serverQueue = ""
+const queue = new Map();
+const fs = require('fs');
+var cookies = fs.readFileSync('./cookies.txt', 'utf8');
+const limiter = new Bottleneck({
+    maxConcurrent: 1,
+    minTime: 2000 // 
+});
+cookies = cookies.replace(/[^\x20-\x7E]/g, '');
+cookies = encodeURIComponent(cookies);
+playdl.setToken({
+    youtube: {
+        cookie: cookies
+    }
+});
+
+const path = require("path");
+
+const directory = "Music";
+
 
 client.login(process.env.DISCORD_TOKEN);
 
 client.on('ready', () => {
     console.log('Ready!');
-   });
+    fs.readdir(directory, (err, files) => {
+        if (err) throw err;
 
-client.on('messageCreate', async (message)=>{
+        for (const file of files) {
+            fs.unlink(path.join(directory, file), (err) => {
+                if (err) throw err;
+            });
+        }
+    });
 
-    if(message.content==='ping'){
+});
+
+
+client.once("reconnecting", () => {
+    console.log("Reconnecting!");
+});
+
+client.once("disconnect", () => {
+    console.log("Disconnect!");
+
+});
+
+client.on("messageCreate", async message => {
+
+    console.log("yesss")
+    if (message.content === 'ping') {
         message.reply('test')
     }
-    else if(message.content.includes('gay')){
-        message.reply('no u')
+    if (message.content.toLowerCase().includes('pokemon')) {
+        message.reply('is cool')
     }
-    else if(message.content.includes('u suck')){
-        message.reply('dicks :eggplant: ')
+    if (message.content.toLowerCase().includes('bob')) {
+        message.reply('the mighty')
     }
-    else if(message.content.includes('dick')){
-        message.reply('cheese :cheese:')
+    if (message.content.toLowerCase().includes('subway')) {
+        message.reply('12 inches is not enough')
     }
-    else if(message.content.includes('pokemon')){
-        message.reply('is shit :upside_down: ')
+    if (message.content.toLowerCase().includes('eduardo')) {
+        message.reply('is suffering with derivatives')
     }
-    else if(message.content.includes('bob')){
-        message.reply('the mighty :banana: ')
+    if (message.content.toLowerCase().includes('chinese')) {
+        message.reply('Jo\'s girlfriend?')
     }
-
-    if (message.author.bot || !message.guild) return;
-    if (!client.application?.owner) await client.application?.fetch();
-
-    if (message.content === "!deploy" && message.author.id === client.application?.owner?.id) {
-        await message.guild.commands.set([
-            {
-                name: "bob",
-                description: "Plays a song from youtube",
-                options: [
-                    {
-                        name: "query",
-                        type: 3,
-                        description: "The song you want to play",
-                        required: true
-                    }
-                ]
-            },
-            {
-                name: "skip",
-                description: "Skip to the current song"
-            },
-            {
-                name: "queue",
-                description: "See the queue"
-            },
-            {
-                name: "stop",
-                description: "Stop the player"
-            },
-            {
-                name: "fuckoff",
-                description: "player leave"
-            },
-        ]);
-
-        await message.reply("Deployed!");
+    if (message.content.toLowerCase().includes('mom')) {
+        message.reply('Hide them from Jo')
+    }
+    if (message.content.includes('Daphné')) {
+        message.reply('Est admireur de Shrek')
     }
 
-})
 
-client.on("interactionCreate", async (interaction) => {
-    //if (!interaction.isCommand() || !interaction.guildId) return;
+    if (message.author.bot) return;
+    if (!message.content.startsWith(prefix)) return;
+
+    serverQueue = queue.get(message.guild.id);
+
+    if (!serverQueue) {
+        // Initialize the queue for this guild
+        const queueConstruct = {
+            textChannel: message.channel,
+            voiceChannel: message.member.voice.channel,
+            connection: null,
+            songs: [],
+            audioPlayer: createAudioPlayer(),
+            volume: 5,
+            playing: true
+        };
+        queue.set(message.guild.id, queueConstruct);
+    }
 
 
-    if (interaction.commandName === "bob") {
-        await interaction.deferReply();
 
-        const query = interaction.options.get("query").value;
-        const searchResult = await player
-            .search(query, {
-                requestedBy: interaction.user,
-                searchEngine: QueryType.AUTO
-            })
-            //.catch(() => {});
-        if (!searchResult || !searchResult.tracks.length) return void interaction.followUp({ content: "No results were found!" });
+    if (message.content.startsWith(`${prefix}play`)) {
+        execute(message, serverQueue);
+        return;
+    } else if (message.content.startsWith(`${prefix}skip`)) {
+        skip(message, serverQueue);
+        return;
+    } else if (message.content.startsWith(`${prefix}stop`)) {
+        stop(message, serverQueue);
+        return;
+    } else {
+        message.channel.send("You need to enter a valid command!");
+    }
+});
+const getVideoInfo = limiter.wrap(async (url) => {
+    const songInfo = await ytdl.getInfo(url);
+    return {
+        title: songInfo.videoDetails.title,
+        url: songInfo.videoDetails.video_url
+    };
+});
+async function execute(message, serverQueue) {
+    const args = message.content.split(" ");
 
-        const queue = player.createQueue(interaction.guild, {
-            metadata: interaction.channel,
-        });
+    try {
+        const song = await getVideoInfo(args[1]);
 
-        try {
-            if (!queue.connection) await queue.connect(interaction.member.voice.channel);
-        } catch {
-            void player.deleteQueue(interaction.guildId);
-            return void interaction.followUp({ content: "Could not join your voice channel!" });
+        if (!serverQueue) {
+            const queueConstruct = {
+                textChannel: message.channel,
+                voiceChannel: message.member.voice.channel,
+                connection: null,
+                songs: [],
+                audioPlayer: createAudioPlayer(),
+                volume: 5,
+                playing: true
+            };
+            queue.set(message.guild.id, queueConstruct);
+            queueConstruct.songs.push(song);
+
+            try {
+                const connection = joinVoiceChannel({
+                    channelId: message.member.voice.channel.id,
+                    guildId: message.guild.id,
+                    adapterCreator: message.guild.voiceAdapterCreator
+                });
+                queueConstruct.connection = connection;
+                connection.subscribe(queueConstruct.audioPlayer);
+                play(message.guild, queueConstruct.songs[0]);
+
+            } catch (err) {
+                console.error(err);
+                queue.delete(message.guild.id);
+                return message.channel.send(err.message);
+            }
+        } else {
+            serverQueue.songs.push(song);
+            return message.channel.send(`${song.title} has been added to the queue!`);
         }
-
-        await interaction.followUp({ content: `⏱ | Loading your ${searchResult.playlist ? "playlist" : "track"}...` });
-        searchResult.playlist ? queue.addTracks(searchResult.tracks) : queue.addTrack(searchResult.tracks[0]);
-        if (!queue.playing) await queue.play();
-
-        console.log(searchResult.tracks)
-
-
-    } else if (interaction.commandName === "skip") {
-        await interaction.deferReply();
-        const queue = player.getQueue(interaction.guildId);
-        if (!queue || !queue.playing) return void interaction.followUp({ content: "❌ | No music is being played!" });
-        const currentTrack = queue.current;
-        const success = queue.skip();
-        return void interaction.followUp({
-            content: success ? `✅ | Skipped **${currentTrack}**!` : "❌ | Something went wrong!"
-        });
-    } else if (interaction.commandName === "stop") {
-        await interaction.deferReply();
-        const queue = player.getQueue(interaction.guildId);
-        if (!queue || !queue.playing) return void interaction.followUp({ content: "❌ | No music is being played!" });
-        queue.destroy();
-        return void interaction.followUp({ content: "🛑 | Stopped the player!" });
-
-    }else if(interaction.commandName === "fuckoff"){
-        await interaction.deferReply();
-        const queue = player.getQueue(interaction.guildId);
-        queue.destroy();
-        await interaction.followUp({ content: "cry ;-;" });
-    } 
-    else {
-        interaction.reply({
-            content: "Unknown command!",
-            ephemeral: true
-        });
+    } catch (error) {
+        console.error('Error fetching video info:', error);
+        return message.channel.send('Failed to process the YouTube URL');
     }
-});
-   
-   client.on("error", console.error);
-   client.on("warn", console.warn);
+}
+
+function skip(message, serverQueue) {
+    if (!message.member.voice.channel)
+        return message.channel.send("You have to be in a voice channel to skip the music!");
+    if (!serverQueue)
+        return message.channel.send("There is no song to skip!");
+
+
+    serverQueue.textChannel.send(`🎵 Now Skipping: **${serverQueue.songs[0].title}**`);
+    serverQueue.audioPlayer.stop(); // Stop the current song
+}
+
+function stop(message, serverQueue) {
+    if (!message.member.voice.channel) {
+        return message.channel.send("You have to be in a voice channel to stop the music!");
+    }
+
+    // Check if there is an active serverQueue
+    if (!serverQueue) {
+        return message.channel.send(`Ciao byeee!`);
+        
+    }
+
+    // Clear the queue and stop playback
+    serverQueue.songs = []; // Clear the queue
+    serverQueue.audioPlayer.stop(); // Stop playback
+
+    // Send a message and leave the voice channel
+    serverQueue.textChannel.send(`Ciao byeee!`);
+    serverQueue.connection.destroy(); // Leave the voice channel
+
+    // Optionally, delete the queue from memory
+    queue.delete(message.guild.id);
+
+    queue.delete(message.guild.id); // Delete the queue
+    fs.readdir(directory, (err, files) => {
+        if (err) throw err;
+
+        for (const file of files) {
+            fs.unlink(path.join(directory, file), (err) => {
+                if (err) throw err;
+            });
+        }
+    });
+}
 
 
 
 
-player.on("error", (queue, error) => {
-    console.log(`[${queue.guild.name}] Error emitted from the queue: ${error.message}`);
-});
-player.on("connectionError", (queue, error) => {
-    console.log(`[${queue.guild.name}] Error emitted from the connection: ${error.message}`);
-});
+async function play(guild, song) {
+    const serverQueue = queue.get(guild.id);
+    if (!serverQueue || !serverQueue.audioPlayer) {
+        console.error('Server queue or audio player not found');
+        return;
+    }
 
-player.on("trackStart", (queue, track) => {
-    queue.metadata.send(`🎶 | Started playing: **${track.title}** in **${queue.connection.channel.name}**!`);
-});
+    if (!song) {
+        serverQueue.connection.destroy();
+        fs.readdir(directory, (err, files) => {
+            if (err) throw err;
 
-player.on("trackAdd", (queue, track) => {
-    queue.metadata.send(`🎶 | Track **${track.title}** queued!`);
-});
+            for (const file of files) {
+                fs.unlink(path.join(directory, file), (err) => {
+                    if (err) throw err;
+                });
+            }
+        });
+        queue.delete(guild.id);
+        return;
+    }
 
-player.on("botDisconnect", (queue) => {
-    queue.metadata.send("❌ | I was manually disconnected from the voice channel, clearing queue!");
-});
+    try {
+        const filePath = `./Music/${song.title}.mp4`;
+        ytdl(song.url)
+            .pipe(fs.createWriteStream(filePath))
+            .on('finish', async () => {
+                try {
+                    const resource = createAudioResource(fs.createReadStream(filePath));
+                    serverQueue.audioPlayer.play(resource);
+                    serverQueue.textChannel.send(`🎵 Now playing: **${song.title}**`);
+                } catch (error) {
+                    console.error('Error playing local file:', error);
+                    serverQueue.textChannel.send('An error occurred while trying to play the local file.');
+                    playNext(guild, serverQueue);
+                }
+            });
 
-player.on("channelEmpty", (queue) => {
-    queue.metadata.send("❌ | Nobody is in the voice channel, leaving...");
-});
+        serverQueue.audioPlayer.on('stateChange', (oldState, newState) => {
+            console.log(`Player: ${oldState.status} → ${newState.status}`);
+            if (newState.status === 'idle') {
+                playNext(guild, serverQueue);
+            }
+        });
 
-player.on("queueEnd", (queue) => {
-    queue.metadata.send("✅ | Queue finished!");
-});
+        serverQueue.connection.on('stateChange', (oldState, newState) => {
+            console.log(`Connection: ${oldState.status} → ${newState.status}`);
+        });
+
+        console.log(`Now playing: ${song.title}`);
+
+    } catch (error) {
+        console.error(`Error playing ${song.title}:`, error);
+        playNext(guild, serverQueue);
+    }
+}
+
+function playNext(guild, serverQueue) {
+    serverQueue.songs.shift();
+    if (serverQueue.songs.length > 0) {
+        play(guild, serverQueue.songs[0]);
+    } else {
+        serverQueue.textChannel.send('Queue is empty ;-;');
+
+        queue.delete(guild.id);
+    }
+}
+
+
+
+
+
+
+
+
