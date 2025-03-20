@@ -1,31 +1,24 @@
 const { Client, GuildMember, Intents, GatewayIntentBits } = require("discord.js");
 const { Player, QueryType } = require("discord-player");
 const Discord = require("discord.js");
-const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, StreamType, entersState, VoiceConnectionStatus, joinVoiceChannel } = require('@discordjs/voice');
+const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, StreamType, entersState, VoiceConnectionStatus, getVoiceConnection , joinVoiceChannel } = require('@discordjs/voice');
 const client = new Discord.Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates]
 });
 require('dotenv').config();
 
 const ytdl = require("@distube/ytdl-core");
-const playdl = require('play-dl');
 
 const prefix = "!"
 const Bottleneck = require('bottleneck');
 var serverQueue = ""
 const queue = new Map();
 const fs = require('fs');
-var cookies = fs.readFileSync('./cookies.txt', 'utf8');
+
+//limiter to avoid being flagged by youtube bot blocker
 const limiter = new Bottleneck({
     maxConcurrent: 1,
-    minTime: 2000 // 
-});
-cookies = cookies.replace(/[^\x20-\x7E]/g, '');
-cookies = encodeURIComponent(cookies);
-playdl.setToken({
-    youtube: {
-        cookie: cookies
-    }
+    minTime: 1000 
 });
 
 const path = require("path");
@@ -62,6 +55,8 @@ client.once("disconnect", () => {
 client.on("messageCreate", async message => {
 
     console.log("yesss")
+
+    //custom messages
     if (message.content === 'ping') {
         message.reply('test')
     }
@@ -83,8 +78,11 @@ client.on("messageCreate", async message => {
     if (message.content.toLowerCase().includes('mom')) {
         message.reply('Hide them from Jo')
     }
-    if (message.content.includes('Daphné')) {
+    if (message.content.toLowerCase().includes('daphné')) {
         message.reply('Est admireur de Shrek')
+    }
+    if (message.content.toLowerCase().includes('hotel')) {
+        message.reply('Trivago')
     }
 
 
@@ -108,7 +106,7 @@ client.on("messageCreate", async message => {
     }
 
 
-
+    //prefix can be changed
     if (message.content.startsWith(`${prefix}play`)) {
         execute(message, serverQueue);
         return;
@@ -136,6 +134,7 @@ async function execute(message, serverQueue) {
         const song = await getVideoInfo(args[1]);
 
         if (!serverQueue) {
+            //set queue
             const queueConstruct = {
                 textChannel: message.channel,
                 voiceChannel: message.member.voice.channel,
@@ -149,6 +148,7 @@ async function execute(message, serverQueue) {
             queueConstruct.songs.push(song);
 
             try {
+                //join VC
                 const connection = joinVoiceChannel({
                     channelId: message.member.voice.channel.id,
                     guildId: message.guild.id,
@@ -173,6 +173,7 @@ async function execute(message, serverQueue) {
     }
 }
 
+//skip current song and move to the next
 function skip(message, serverQueue) {
     if (!message.member.voice.channel)
         return message.channel.send("You have to be in a voice channel to skip the music!");
@@ -184,42 +185,35 @@ function skip(message, serverQueue) {
     serverQueue.audioPlayer.stop(); // Stop the current song
 }
 
+//stop music and quit the VC
 function stop(message, serverQueue) {
     if (!message.member.voice.channel) {
         return message.channel.send("You have to be in a voice channel to stop the music!");
     }
 
-    // Check if there is an active serverQueue
-    if (!serverQueue) {
-        return message.channel.send(`Ciao byeee!`);
-        
+    //if there's no songs
+    if (!serverQueue || serverQueue.songs.length === 0) {
+        const connection = getVoiceConnection(message.guild.id);
+        if (connection) {
+            connection.destroy(); 
+            return message.channel.send("Ciao byeee!");
+        } else {
+            return message.channel.send("No active voice connection to stop!");
+        }
     }
 
-    // Clear the queue and stop playback
+  
+    //if there are songs
     serverQueue.songs = []; // Clear the queue
     serverQueue.audioPlayer.stop(); // Stop playback
 
-    // Send a message and leave the voice channel
-    serverQueue.textChannel.send(`Ciao byeee!`);
-    serverQueue.connection.destroy(); // Leave the voice channel
+    
+    message.channel.send(`Ciao byeee!`);
+    serverQueue.connection.destroy(); 
 
-    // Optionally, delete the queue from memory
+    // Delete the queue from memory
     queue.delete(message.guild.id);
-
-    queue.delete(message.guild.id); // Delete the queue
-    fs.readdir(directory, (err, files) => {
-        if (err) throw err;
-
-        for (const file of files) {
-            fs.unlink(path.join(directory, file), (err) => {
-                if (err) throw err;
-            });
-        }
-    });
 }
-
-
-
 
 async function play(guild, song) {
     const serverQueue = queue.get(guild.id);
@@ -228,8 +222,12 @@ async function play(guild, song) {
         return;
     }
 
+    //no songs then leave
     if (!song) {
+      
         serverQueue.connection.destroy();
+
+        //empty music folder
         fs.readdir(directory, (err, files) => {
             if (err) throw err;
 
@@ -243,9 +241,21 @@ async function play(guild, song) {
         return;
     }
 
+   
+
     try {
+
+        //improve audio quality
+        const ytdlOptions = {
+            filter: 'audioonly',
+            quality: 'highestaudio',
+            format: 'bestaudio',
+            noplaylist: true,
+        };
+      
+        //download songs from link and play it
         const filePath = `./Music/${song.title}.mp4`;
-        ytdl(song.url)
+        ytdl(song.url, ytdlOptions)
             .pipe(fs.createWriteStream(filePath))
             .on('finish', async () => {
                 try {
@@ -259,6 +269,7 @@ async function play(guild, song) {
                 }
             });
 
+            //playing next song if current song has finish playing
         serverQueue.audioPlayer.on('stateChange', (oldState, newState) => {
             console.log(`Player: ${oldState.status} → ${newState.status}`);
             if (newState.status === 'idle') {
@@ -279,15 +290,26 @@ async function play(guild, song) {
 }
 
 function playNext(guild, serverQueue) {
+    // Remove the first song from the queue
     serverQueue.songs.shift();
+
     if (serverQueue.songs.length > 0) {
+        // Play the next song in the queue
         play(guild, serverQueue.songs[0]);
     } else {
-        serverQueue.textChannel.send('Queue is empty ;-;');
+        // Prevent duplicate messages
+        if (!serverQueue.queueEnded) {
+            serverQueue.queueEnded = true; // Set a flag to indicate the queue is empty
+            serverQueue.textChannel.send('Queue is empty ;-;');
+            
+        }
 
+        // Clean up the server queue
         queue.delete(guild.id);
     }
 }
+
+
 
 
 
