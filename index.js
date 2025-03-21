@@ -1,27 +1,33 @@
-const { Client, GuildMember, Intents, GatewayIntentBits } = require("discord.js");
-const { Player, QueryType } = require("discord-player");
-const Discord = require("discord.js");
-const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, StreamType, entersState, VoiceConnectionStatus, getVoiceConnection , joinVoiceChannel } = require('@discordjs/voice');
-const client = new Discord.Client({
+const { Client, GuildMember, GatewayIntentBits } = require('discord.js');
+const { createAudioPlayer, createAudioResource, NoSubscriberBehavior, StreamType, entersState, VoiceConnectionStatus, getVoiceConnection, joinVoiceChannel } = require('@discordjs/voice');
+const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildVoiceStates]
 });
 require('dotenv').config();
-
+//const ffmpeg = require('@ffmpeg-installer/ffmpeg');
+const fluentFfmpeg = require('fluent-ffmpeg');
+const ffmpeg = require('fluent-ffmpeg');
 const ytdl = require("@distube/ytdl-core");
-
-const prefix = "!"
+const { getInfo } = require('@distube/ytdl-core');
 const Bottleneck = require('bottleneck');
+const fs = require('fs');
+const { readdir, unlink, createWriteStream, createReadStream } = require('fs');
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const playdl = require('play-dl');
+const { exec } = require('child_process');
+ffmpeg.setFfmpegPath(ffmpegPath);
+const prefix = "!"
 var serverQueue = ""
 const queue = new Map();
-const fs = require('fs');
-
 //limiter to avoid being flagged by youtube bot blocker
 const limiter = new Bottleneck({
     maxConcurrent: 1,
-    minTime: 1000 
+    minTime: 2000
 });
 
-const path = require("path");
+const { join } = require('path');
+const { OpusEncoder } = require('@discordjs/opus');
+
 
 const directory = "Music";
 
@@ -30,11 +36,11 @@ client.login(process.env.DISCORD_TOKEN);
 
 client.on('ready', () => {
     console.log('Ready!');
-    fs.readdir(directory, (err, files) => {
+    readdir(directory, (err, files) => {
         if (err) throw err;
 
         for (const file of files) {
-            fs.unlink(path.join(directory, file), (err) => {
+            unlink(join(directory, file), (err) => {
                 if (err) throw err;
             });
         }
@@ -121,7 +127,7 @@ client.on("messageCreate", async message => {
     }
 });
 const getVideoInfo = limiter.wrap(async (url) => {
-    const songInfo = await ytdl.getInfo(url);
+    const songInfo = await getInfo(url);
     return {
         title: songInfo.videoDetails.title,
         url: songInfo.videoDetails.video_url
@@ -175,14 +181,29 @@ async function execute(message, serverQueue) {
 
 //skip current song and move to the next
 function skip(message, serverQueue) {
-    if (!message.member.voice.channel)
+    if (!message.member.voice.channel) {
         return message.channel.send("You have to be in a voice channel to skip the music!");
-    if (!serverQueue)
-        return message.channel.send("There is no song to skip!");
+    }
+    if (!serverQueue || serverQueue.songs.length === 0) {
+        return message.channel.send("There are no songs left to skip!");
+    }
 
-
+    // Notify the user about the skipped song
     serverQueue.textChannel.send(`🎵 Now Skipping: **${serverQueue.songs[0].title}**`);
-    serverQueue.audioPlayer.stop(); // Stop the current song
+
+    // Remove the current song from the queue
+    serverQueue.songs.shift();
+
+    // Check if there are more songs in the queue
+    if (serverQueue.songs.length > 0) {
+        playNext(message.guild, serverQueue); // Play the next song
+    } else {
+        // If no songs are left, stop the audio player and disconnect
+        serverQueue.audioPlayer.stop();
+        serverQueue.connection.destroy();
+        message.channel.send("No more songs in the queue. Leaving the voice channel.");
+        queue.delete(message.guild.id); // Clean up the server's queue
+    }
 }
 
 //stop music and quit the VC
@@ -195,21 +216,21 @@ function stop(message, serverQueue) {
     if (!serverQueue || serverQueue.songs.length === 0) {
         const connection = getVoiceConnection(message.guild.id);
         if (connection) {
-            connection.destroy(); 
+            connection.destroy();
             return message.channel.send("Ciao byeee!");
         } else {
             return message.channel.send("No active voice connection to stop!");
         }
     }
 
-  
+
     //if there are songs
     serverQueue.songs = []; // Clear the queue
     serverQueue.audioPlayer.stop(); // Stop playback
 
-    
+
     message.channel.send(`Ciao byeee!`);
-    serverQueue.connection.destroy(); 
+    serverQueue.connection.destroy();
 
     // Delete the queue from memory
     queue.delete(message.guild.id);
@@ -217,59 +238,69 @@ function stop(message, serverQueue) {
 
 async function play(guild, song) {
     const serverQueue = queue.get(guild.id);
+
     if (!serverQueue || !serverQueue.audioPlayer) {
         console.error('Server queue or audio player not found');
         return;
     }
 
-    //no songs then leave
     if (!song) {
-      
         serverQueue.connection.destroy();
 
-        //empty music folder
-        fs.readdir(directory, (err, files) => {
-            if (err) throw err;
-
-            for (const file of files) {
-                fs.unlink(path.join(directory, file), (err) => {
-                    if (err) throw err;
-                });
-            }
-        });
         queue.delete(guild.id);
         return;
     }
 
-   
-
     try {
-
-        //improve audio quality
         const ytdlOptions = {
-            filter: 'audioonly',
-            quality: 'highestaudio',
-            format: 'bestaudio',
-            noplaylist: true,
+
+            highWaterMark: 1 << 25,
+            
+            
         };
-      
+
         //download songs from link and play it
-        const filePath = `./Music/${song.title}.mp4`;
+        const filePath = `./Music/${song.title.replace(/[/\\?%*:|"<>]/g, '-')}.flac`;
+
         ytdl(song.url, ytdlOptions)
-            .pipe(fs.createWriteStream(filePath))
-            .on('finish', async () => {
-                try {
-                    const resource = createAudioResource(fs.createReadStream(filePath));
-                    serverQueue.audioPlayer.play(resource);
-                    serverQueue.textChannel.send(`🎵 Now playing: **${song.title}**`);
-                } catch (error) {
-                    console.error('Error playing local file:', error);
-                    serverQueue.textChannel.send('An error occurred while trying to play the local file.');
-                    playNext(guild, serverQueue);
-                }
+            .pipe(fs.createWriteStream(`${filePath}.webm`))
+            .on('finish', () => {
+                // Convert WebM to Opus using FFmpeg
+                exec(`ffmpeg -i "${filePath}.webm" -c:a libopus -vbr on -compression_level 10 -b:a 256k -ar 48000 -af "aresample=resampler=soxr" "${filePath}.opus"`, (error) => {
+                    if (error) {
+                        console.error('Error converting file:', error);
+                        return;
+                    }
+
+                    try {
+                        const resource = createAudioResource(`${filePath}.opus`, {
+                            inputType: StreamType.WebmOpus,
+                            inlineVolume: true,
+                            
+                        });
+
+                        resource.volume.setVolumeLogarithmic(1); 
+                        serverQueue.audioPlayer.play(resource);
+                        serverQueue.textChannel.send(`🎵 Now playing: **${song.title}**`);
+
+                        // Clean up temporary files
+                        fs.unlink(`${filePath}.webm`, (err) => {
+                            if (err) console.error('Error deleting WebM file:', err);
+                        });
+                    } catch (error) {
+                        console.error('Error playing processed file:', error);
+                        serverQueue.textChannel.send('An error occurred while trying to play the processed file.');
+                        playNext(guild, serverQueue);
+                    }
+                });
+            })
+            .on('error', (err) => {
+                console.error('Error downloading video:', err);
+                serverQueue.textChannel.send('An error occurred while downloading the video.');
+                playNext(guild, serverQueue);
             });
 
-            //playing next song if current song has finish playing
+
         serverQueue.audioPlayer.on('stateChange', (oldState, newState) => {
             console.log(`Player: ${oldState.status} → ${newState.status}`);
             if (newState.status === 'idle') {
@@ -282,33 +313,42 @@ async function play(guild, song) {
         });
 
         console.log(`Now playing: ${song.title}`);
-
     } catch (error) {
-        console.error(`Error playing ${song.title}:`, error);
-        playNext(guild, serverQueue);
+        handleStreamingError(error, serverQueue, guild);
     }
+}
+
+
+function handleStreamingError(error, serverQueue, guild) {
+    console.error('Streaming Error:', error);
+    console.error('Error stack:', error.stack);
+
 }
 
 function playNext(guild, serverQueue) {
-    // Remove the first song from the queue
-    serverQueue.songs.shift();
-
-    if (serverQueue.songs.length > 0) {
-        // Play the next song in the queue
-        play(guild, serverQueue.songs[0]);
-    } else {
-        // Prevent duplicate messages
-        if (!serverQueue.queueEnded) {
-            serverQueue.queueEnded = true; // Set a flag to indicate the queue is empty
-            serverQueue.textChannel.send('Queue is empty ;-;');
-            
-        }
-
-        // Clean up the server queue
+    if (!serverQueue.songs.length) {
+        // If no more songs are in the queue, disconnect and clean up
+        serverQueue.connection.destroy();
         queue.delete(guild.id);
+        serverQueue.textChannel.send("No more songs in the queue. Leaving the voice channel.");
+        return;
+    }
+
+    const nextSong = serverQueue.songs[0];
+
+    try {
+        const stream = ytdl(nextSong.url, { filter: 'audioonly', quality: 'highestaudio' });
+        const resource = createAudioResource(stream);
+
+        serverQueue.audioPlayer.play(resource);
+
+        serverQueue.textChannel.send(`🎵 Now Playing: **${nextSong.title}**`);
+    } catch (error) {
+        console.error(`Error playing next song: ${error}`);
+        serverQueue.songs.shift(); // Remove the problematic song and try the next one
+        playNext(guild, serverQueue);
     }
 }
-
 
 
 
